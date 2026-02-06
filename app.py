@@ -4,7 +4,7 @@ import datetime
 import yfinance as yf
 from amadeus import Client, ResponseError
 
-# 1. Amadeus 보안 설정
+# 1. Amadeus 보안 설정 (Streamlit Secrets 사용)
 try:
     amadeus = Client(
         client_id=st.secrets["AMADEUS_KEY"],
@@ -14,114 +14,133 @@ except Exception as e:
     st.error("API Key 설정 오류: Streamlit Secrets를 확인해주세요.")
     st.stop()
 
-# 2. 실시간 환율 가져오기
+# 2. 실시간 환율 가져오기 (EUR -> KRW)
 @st.cache_data(ttl=3600)
 def get_eur_krw_rate():
     try:
+        # 야후 파이낸스에서 실시간 유로/원 환율 추출
         ticker = yf.Ticker("EURKRW=X")
-        return ticker.history(period='1d')['Close'].iloc[-1]
+        rate = ticker.history(period='1d')['Close'].iloc[-1]
+        return rate
     except:
-        return 1500.0
+        return 1510.0  # 데이터 획득 실패 시 기본값
 
-# 3. 실시간 항공권 조회 함수 (Flight Offers Search 사용)
-def fetch_month_prices(origin, destination, year, month, min_stay, max_stay):
-    price_data = {}
+# 3. UI 스타일 설정 (CSS)
+st.set_page_config(layout="wide", page_title="Direct Search Flight Calendar")
+st.markdown("""
+<style>
+    .cal-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    .cal-th { background: #f8f9fa; padding: 12px; border: 1px solid #dee2e6; text-align: center; }
+    .cal-td { border: 1px solid #dee2e6; height: 120px; vertical-align: top; padding: 10px; width: 14.28%; }
+    .day-num { font-weight: bold; font-size: 1.1rem; margin-bottom: 8px; }
+    .price-val { font-size: 0.85rem; padding: 5px; border-radius: 4px; text-align: center; line-height: 1.4; }
+    .cheap-price { background-color: #eff6ff; color: #1d4ed8; font-weight: bold; border: 1px solid #bfdbfe; }
+    .normal-price { background-color: #f9fafb; color: #4b5563; border: 1px solid #f3f4f6; }
+    .empty-day { color: #d1d5db; font-size: 0.75rem; }
+</style>
+""", unsafe_allow_html=True)
+
+# 4. 사이드바 검색 조건 설정
+with st.sidebar:
+    st.header("🔍 검색 필터")
+    origin = st.text_input("출발지 (IATA)", value="ICN").upper()
+    dest = st.text_input("도착지 (IATA)", value="NRT").upper()
+    
+    st.subheader("📅 조회 일정")
+    target_year = st.selectbox("연도", [2026, 2027], index=0)
+    target_month = st.selectbox("월", list(range(1, 13)), index=4) # 기본 5월
+    
+    st.subheader("⚙️ 옵션")
+    is_non_stop = st.checkbox("✈️ 직항만 보기", value=True)
+    passengers = st.number_input("인원수 (성인)", 1, 9, 1)
+    
+    st.divider()
+    run = st.button("🚀 실시간 전수조사 시작", use_container_width=True)
+
+# 5. 메인 화면 상단 정보
+st.title(f"📊 {target_year}년 {target_month}월 항공권 최저가 리포트")
+current_rate = get_eur_krw_rate()
+st.write(f"ℹ️ **적용 환율:** 1 EUR = **{current_rate:,.2f} KRW** (Yahoo Finance 실시간 데이터)")
+
+# 6. 메인 로직 실행
+if run:
+    # 해당 월의 일수 계산
+    last_day = calendar.monthrange(target_year, target_month)[1]
+    
+    price_dict = {}
     all_prices = []
     
-    # 해당 월의 마지막 날 계산
-    last_day = calendar.monthrange(year, month)[1]
-    
-    # 진행 바 표시
+    # 진행 상황 표시
     progress_bar = st.progress(0)
     status_text = st.empty()
 
+    # 1일부터 말일까지 실시간 API 호출 루프
     for day in range(1, last_day + 1):
-        departure_date = f"{year}-{month:02d}-{day:02d}"
-        status_text.text(f"🔍 {departure_date} 실시간 가격 조회 중...")
+        dep_date = f"{target_year}-{target_month:02d}-{day:02d}"
+        status_text.text(f"📡 {dep_date} {'직항' if is_non_stop else '전체'} 가격 조회 중... ({day}/{last_day})")
         
         try:
-            # 실시간 API 호출 (이건 400 에러가 거의 안 납니다)
+            # 실시간 항공권 검색 API (Flight Offers Search)
             response = amadeus.shopping.flight_offers_search.get(
                 originLocationCode=origin,
-                destinationLocationCode=destination,
-                departureDate=departure_date,
-                adults=1, # 기준 가격은 1인으로 조회
-                max=3     # 가장 싼 거 3개만
+                destinationLocationCode=dest,
+                departureDate=dep_date,
+                adults=passengers,
+                nonStop='true' if is_non_stop else 'false',
+                max=1  # 가장 싼 표 1개만 신속하게 가져옴
             )
             
             if response.data:
-                # 가장 저렴한 가격 추출
-                cheapest_offer = response.data[0]
-                eur_price = float(cheapest_offer['price']['total'])
-                
-                # 결과 저장
-                if day not in price_data:
-                    price_data[day] = {"stays": {}}
-                
-                # Flight Offers Search는 복귀일을 랜덤하게 주지 않으므로 
-                # 여기서는 '출발일 기준 최저가'를 메인으로 표시합니다.
-                price_data[day]["stays"]["최저"] = eur_price
-                all_prices.append(eur_price)
-                
-        except ResponseError:
-            pass # 데이터 없는 날은 건너뜀
+                eur_price = float(response.data[0]['price']['total'])
+                krw_price = int(eur_price * current_rate)
+                price_dict[day] = krw_price
+                all_prices.append(krw_price)
+            
+        except ResponseError as e:
+            # API 오류나 데이터 부재 시 로그 없이 스킵
+            pass
             
         progress_bar.progress(day / last_day)
-    
-    status_text.text("✅ 분석 완료!")
-    return price_data, all_prices
 
-# 4. UI 설정
-st.set_page_config(layout="wide")
-st.title("✈️ 실시간 항공권 캘린더 (Direct Search)")
+    status_text.success(f"✅ {target_year}년 {target_month}월 전수조사가 완료되었습니다!")
 
-with st.sidebar:
-    st.header("🔍 검색 조건")
-    origin = st.text_input("출발지 (IATA)", value="ICN").upper()
-    dest = st.text_input("도착지 (IATA)", value="NRT").upper()
-    target_year = st.selectbox("연도", [2026, 2027], index=0)
-    target_month = st.selectbox("월", list(range(1, 13)), index=4) # 5월 기본
-    passengers = st.number_input("인원수", 1, 9, 1)
-    run = st.button("🚀 실시간 데이터 분석 시작")
-
-current_rate = get_eur_krw_rate()
-st.info(f"ℹ️ 현재 환율: 1 EUR = {current_rate:,.2f} KRW")
-
-if run:
-    # 실시간 데이터 수집
-    price_dict, all_prices = fetch_month_prices(origin, dest, target_year, target_month, 0, 0)
-    
+    # 7. 달력 렌더링
     if not all_prices:
-        st.error("해당 노선/날짜에 조회 가능한 항공권이 없습니다. IATA 코드를 확인해주세요.")
+        st.error(f"조회된 항공권 데이터가 없습니다. {origin}→{dest} 노선의 직항 여부나 날짜를 확인해 주세요.")
     else:
-        # 달력 그리기 로직 (위와 동일)
-        cal = calendar.Calendar(firstweekday=6)
-        weeks = cal.monthdayscalendar(target_year, target_month)
-        
+        # 상위 20% 저렴한 가격 강조 기준값
         threshold = sorted(all_prices)[int(len(all_prices) * 0.2)] if all_prices else 0
         
-        html = "<table style='width:100%; border-collapse:collapse;'>"
-        html += "<tr>" + "".join(f"<th style='border:1px solid #ddd; padding:10px;'>{w}</th>" for w in ["일","월","화","수","목","금","토"]) + "</tr>"
-        
+        cal = calendar.Calendar(firstweekday=6) # 일요일 시작
+        weeks = cal.monthdayscalendar(target_year, target_month)
+        week_names = ["일", "월", "화", "수", "목", "금", "토"]
+
+        # HTML 테이블 생성
+        html = "<table class='cal-table'><tr>"
+        for w in week_names:
+            html += f"<th class='cal-th'>{w}</th>"
+        html += "</tr>"
+
         for week in weeks:
             html += "<tr>"
             for day in week:
                 if day == 0:
-                    html += "<td style='border:1px solid #ddd; height:100px;'></td>"
-                    continue
-                
-                info = price_dict.get(day, {"stays": {}})
-                cell = f"<div style='font-weight:bold;'>{day}</div>"
-                
-                if "최저" in info["stays"]:
-                    eur = info["stays"]["최저"]
-                    krw = int(eur * current_rate * passengers)
-                    color = "#1d4ed8" if eur <= threshold else "#4b5563"
-                    cell += f"<div style='color:{color}; font-size:0.8rem; margin-top:5px;'>{krw:,}원</div>"
+                    html += "<td class='cal-td'></td>"
                 else:
-                    cell += "<div style='color:#ccc; font-size:0.7rem;'>-</div>"
-                
-                html += f"<td style='border:1px solid #ddd; height:100px; vertical-align:top; padding:5px;'>{cell}</td>"
+                    price = price_dict.get(day)
+                    price_html = ""
+                    if price:
+                        p_class = "cheap-price" if price <= threshold else "normal-price"
+                        price_html = f"<div class='price-val {p_class}'>{price:,}원</div>"
+                    else:
+                        price_html = "<div class='empty-day'>데이터 없음</div>"
+                    
+                    html += f"<td class='cal-td'><div class='day-num'>{day}</div>{price_html}</td>"
             html += "</tr>"
         html += "</table>"
+        
         st.markdown(html, unsafe_allow_html=True)
+        st.caption("※ 위 가격은 실시간 최저가 기준이며, 실제 예약 시점에 따라 변동될 수 있습니다.")
+
+else:
+    st.info("사이드바에서 조건을 설정한 후 '조회 시작' 버튼을 눌러주세요. (약 20~30초 소요)")

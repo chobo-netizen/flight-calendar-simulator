@@ -1,144 +1,94 @@
 import streamlit as st
-import calendar
+import asyncio
+from playwright.async_api import async_playwright
 import datetime
-import yfinance as yf
-from amadeus import Client, ResponseError
+import calendar
+import pandas as pd
 
-# 1. Amadeus 보안 설정
-try:
-    amadeus = Client(
-        client_id=st.secrets["AMADEUS_KEY"],
-        client_secret=st.secrets["AMADEUS_SECRET"]
-    )
-except Exception as e:
-    st.error("API Key 설정 오류: Streamlit Secrets를 확인해주세요.")
-    st.stop()
+# --- 스카이스캐너 크롤링 함수 (Playwright) ---
+async def get_skyscanner_price(origin, dest, dep_date, ret_date):
+    async with async_playwright() as p:
+        # 브라우저 실행 (Streamlit Cloud 환경 설정)
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+        )
+        page = await context.new_page()
+        
+        url_dep = dep_date.strftime("%y%m%d")
+        url_ret = ret_date.strftime("%y%m%d")
+        url = f"https://www.skyscanner.co.kr/transport/flights/{origin}/{dest}/{url_dep}/{url_ret}/?adults=1&cabinclass=economy&ref=home"
+        
+        try:
+            await page.goto(url, wait_until="networkidle", timeout=60000)
+            # 가격 정보가 담긴 요소가 나타날 때까지 대기
+            # 스카이스캐너의 가격 클래스명은 유동적이므로 '원' 텍스트가 포함된 요소를 찾습니다.
+            price_selector = "span[class*='Price_mainPrice']"
+            await page.wait_for_selector(price_selector, timeout=20000)
+            
+            price_text = await page.inner_text(price_selector)
+            price = int(price_text.replace(",", "").replace("원", "").strip())
+            await browser.close()
+            return price
+        except Exception as e:
+            await browser.close()
+            return None
 
-# 2. 실시간 환율 (EUR -> KRW)
-@st.cache_data(ttl=3600)
-def get_eur_krw_rate():
-    try:
-        ticker = yf.Ticker("EURKRW=X")
-        return ticker.history(period='1d')['Close'].iloc[-1]
-    except:
-        return 1510.0
+# --- UI 레이아웃 ---
+st.set_page_config(page_title="Skyscanner Real-time Scanner", layout="wide")
+st.title("✈️ 스카이스캐너 실시간 연동 캘린더")
 
-# 3. UI 스타일 (다중 가격 표시용)
-st.set_page_config(layout="wide", page_title="Advanced Flight Calendar")
-st.markdown("""
-<style>
-    .cal-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-    .cal-th { background: #f8f9fa; padding: 10px; border: 1px solid #dee2e6; }
-    .cal-td { border: 1px solid #dee2e6; height: 160px; vertical-align: top; padding: 5px; width: 14.28%; }
-    .day-num { font-weight: bold; font-size: 1.1rem; margin-bottom: 5px; border-bottom: 1px solid #eee; }
-    .price-item { font-size: 0.75rem; padding: 2px 4px; border-radius: 3px; margin-bottom: 2px; display: flex; justify-content: space-between; }
-    .cheap { background-color: #e1effe; color: #1e429f; font-weight: bold; }
-    .normal { background-color: #f3f4f6; color: #374151; }
-</style>
-""", unsafe_allow_html=True)
-
-# 4. 사이드바 설정
 with st.sidebar:
-    st.header("🔍 상세 검색")
-    origin = st.text_input("출발지 (IATA)", value="ICN").upper()
-    dest = st.text_input("도착지 (IATA)", value="NRT").upper()
+    st.header("🔍 검색 설정")
+    origin = st.text_input("출발지", value="ICN").upper()
+    dest = st.text_input("도착지", value="NRT").upper()
     
-    target_year = st.selectbox("연도", [2026, 2027], index=0)
-    target_month = st.selectbox("월", list(range(1, 13)), index=4) 
+    target_date = st.date_input("조회 시작일", datetime.date(2026, 5, 1))
     
-    st.subheader("⏳ 체류 기간 설정")
-    min_stay = st.number_input("최소 체류 (박)", 1, 30, 3)
-    max_stay = st.number_input("최대 체류 (박)", 1, 30, 5)
+    st.subheader("⏳ 체류 기간 (박)")
+    min_stay = st.number_input("최소", 1, 10, 3)
+    max_stay = st.number_input("최대", 1, 10, 5)
     
-    st.subheader("⚙️ 필터")
-    is_non_stop = st.checkbox("✈️ 직항만 보기", value=True)
-    passengers = st.number_input("인원수", 1, 9, 1)
-    
-    run = st.button("🚀 전수조사 시작 (호출 소모 주의)", use_container_width=True)
+    run_btn = st.button("🚀 스캔 시작")
 
-# 5. 메인 로직
-st.title(f"📊 {target_year}년 {target_month}월 항공권 가격 분석")
-current_rate = get_eur_krw_rate()
-st.info(f"ℹ️ 환율: 1 EUR = {current_rate:,.2f} KRW")
-
-if run:
-    if min_stay > max_stay:
-        st.error("최소 체류일이 최대 체류일보다 클 수 없습니다.")
-        st.stop()
-
-    last_day = calendar.monthrange(target_year, target_month)[1]
-    price_data = {} # { day: { stay_count: price } }
-    all_prices = []
+if run_btn:
+    # 31일치를 다 돌리기엔 Streamlit Cloud 사양이 낮아 타임아웃 위험이 있습니다.
+    # 우선 특정 날짜부터 일주일치 정도만 테스트해보는 것을 권장합니다.
+    days_to_scan = 7 
     
-    # 총 호출 횟수 계산
-    total_calls = last_day * (max_stay - min_stay + 1)
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    call_count = 0
-    for day in range(1, last_day + 1):
-        price_data[day] = {}
-        dep_date = datetime.date(target_year, target_month, day)
-        
-        # 체류 기간별로 루프
-        for stay in range(min_stay, max_stay + 1):
-            ret_date = dep_date + datetime.timedelta(days=stay)
-            call_count += 1
-            status_text.text(f"📡 조회 중: {dep_date} ({stay}박) - [{call_count}/{total_calls}]")
+    results = []
+
+    # 비동기 함수 실행을 위한 로직
+    async def main_scan():
+        for i in range(days_to_scan):
+            dep_date = target_date + datetime.timedelta(days=i)
+            day_data = {"date": dep_date, "prices": {}}
             
-            try:
-                response = amadeus.shopping.flight_offers_search.get(
-                    originLocationCode=origin,
-                    destinationLocationCode=dest,
-                    departureDate=dep_date.strftime('%Y-%m-%d'),
-                    returnDate=ret_date.strftime('%Y-%m-%d'), # 귀국일 명시로 왕복 검색
-                    adults=passengers,
-                    nonStop='true' if is_non_stop else 'false',
-                    max=1
-                )
+            for stay in range(min_stay, max_stay + 1):
+                ret_date = dep_date + datetime.timedelta(days=stay)
+                status_text.text(f"🔎 {dep_date} ({stay}박) 조회 중...")
                 
-                if response.data:
-                    price = int(float(response.data[0]['price']['total']) * current_rate)
-                    price_data[day][stay] = price
-                    all_prices.append(price)
-            except:
-                pass
+                price = await get_skyscanner_price(origin, dest, dep_date, ret_date)
+                if price:
+                    day_data["prices"][stay] = price
+                
+                # 봇 차단 방지용 미세 대기
+                await asyncio.sleep(1)
             
-            progress_bar.progress(call_count / total_calls)
+            results.append(day_data)
+            progress_bar.progress((i + 1) / days_to_scan)
+        
+        status_text.success("조회 완료!")
+        return results
 
-    status_text.success("✅ 조회가 완료되었습니다!")
-
-    # 6. 달력 그리기
-    threshold = sorted(all_prices)[int(len(all_prices) * 0.2)] if all_prices else 0
+    final_data = asyncio.run(main_scan())
     
-    cal = calendar.Calendar(firstweekday=6)
-    weeks = cal.monthdayscalendar(target_year, target_month)
-    
-    html = "<table class='cal-table'><tr>"
-    for w in ["일","월","화","수","목","금","토"]:
-        html += f"<th class='cal-th'>{w}</th>"
-    html += "</tr>"
-
-    for week in weeks:
-        html += "<tr>"
-        for day in week:
-            if day == 0:
-                html += "<td class='cal-td'></td>"
-                continue
-            
-            day_prices = price_data.get(day, {})
-            cell = f"<div class='day-num'>{day}</div>"
-            
-            if not day_prices:
-                cell += "<div style='color:#ccc; font-size:0.7rem;'>데이터 없음</div>"
-            else:
-                # 체류일 순서대로 정렬해서 표시
-                for stay in sorted(day_prices.keys()):
-                    p = day_prices[stay]
-                    p_class = "cheap" if p <= threshold else "normal"
-                    cell += f"<div class='price-item {p_class}'><span>{stay}박</span> <span>{p:,}원</span></div>"
-            
-            html += f"<td class='cal-td'>{cell}</td>"
-        html += "</tr>"
-    html += "</table>"
-    st.markdown(html, unsafe_allow_html=True)
+    # 결과 출력 (간이 리스트 형태)
+    for res in final_data:
+        st.write(f"📅 **{res['date']} 출발**")
+        cols = st.columns(len(res['prices']))
+        for idx, (stay, price) in enumerate(res['prices'].items()):
+            cols[idx].metric(f"{stay}박", f"{price:,}원")

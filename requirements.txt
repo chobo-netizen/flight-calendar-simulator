@@ -1,10 +1,4 @@
 streamlit
-pandas
-requests
-beautifulsoup4
-lxml
-python-dateutil
-amadeus
-yfinance
 playwright
 pytest-playwright
+pandas

@@ -1,7 +1,7 @@
 import streamlit as st
 import calendar
 import datetime
-import yfinance as yf  # 실시간 환율용
+import yfinance as yf
 from amadeus import Client, ResponseError
 
 # 1. Amadeus 보안 설정
@@ -14,127 +14,114 @@ except Exception as e:
     st.error("API Key 설정 오류: Streamlit Secrets를 확인해주세요.")
     st.stop()
 
-# 2. 실시간 환율 가져오기 함수 (EUR -> KRW)
-@st.cache_data(ttl=3600) # 1시간 동안 환율 결과 캐싱 (API 호출 낭비 방지)
+# 2. 실시간 환율 가져오기
+@st.cache_data(ttl=3600)
 def get_eur_krw_rate():
     try:
-        # 야후 파이낸스에서 유로/원 환율 데이터 추출
         ticker = yf.Ticker("EURKRW=X")
-        todays_data = ticker.history(period='1d')
-        return todays_data['Close'].iloc[-1]
-    except Exception as e:
-        st.warning(f"실시간 환율을 가져오지 못했습니다. 기본값(1,500원)을 사용합니다. 오류: {e}")
+        return ticker.history(period='1d')['Close'].iloc[-1]
+    except:
         return 1500.0
 
-# 3. API 호출 함수
-def fetch_real_prices(origin, destination, departure_month):
-    try:
-        response = amadeus.shopping.flight_dates.get(
-            origin=origin,
-            destination=destination,
-            departureDate=departure_month, 
-            oneWay=False
-        )
-        return response.data
-    except ResponseError as error:
-        st.error(f"API 호출 오류: {error}")
-        return []
+# 3. 실시간 항공권 조회 함수 (Flight Offers Search 사용)
+def fetch_month_prices(origin, destination, year, month, min_stay, max_stay):
+    price_data = {}
+    all_prices = []
+    
+    # 해당 월의 마지막 날 계산
+    last_day = calendar.monthrange(year, month)[1]
+    
+    # 진행 바 표시
+    progress_bar = st.progress(0)
+    status_text = st.empty()
 
-# 4. UI 및 CSS (기존과 동일)
+    for day in range(1, last_day + 1):
+        departure_date = f"{year}-{month:02d}-{day:02d}"
+        status_text.text(f"🔍 {departure_date} 실시간 가격 조회 중...")
+        
+        try:
+            # 실시간 API 호출 (이건 400 에러가 거의 안 납니다)
+            response = amadeus.shopping.flight_offers_search.get(
+                originLocationCode=origin,
+                destinationLocationCode=destination,
+                departureDate=departure_date,
+                adults=1, # 기준 가격은 1인으로 조회
+                max=3     # 가장 싼 거 3개만
+            )
+            
+            if response.data:
+                # 가장 저렴한 가격 추출
+                cheapest_offer = response.data[0]
+                eur_price = float(cheapest_offer['price']['total'])
+                
+                # 결과 저장
+                if day not in price_data:
+                    price_data[day] = {"stays": {}}
+                
+                # Flight Offers Search는 복귀일을 랜덤하게 주지 않으므로 
+                # 여기서는 '출발일 기준 최저가'를 메인으로 표시합니다.
+                price_data[day]["stays"]["최저"] = eur_price
+                all_prices.append(eur_price)
+                
+        except ResponseError:
+            pass # 데이터 없는 날은 건너뜀
+            
+        progress_bar.progress(day / last_day)
+    
+    status_text.text("✅ 분석 완료!")
+    return price_data, all_prices
+
+# 4. UI 설정
 st.set_page_config(layout="wide")
-st.markdown("""
-<style>
-    .block-container { padding-top: 1rem; }
-    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; table-layout: fixed; }
-    th { background-color: #f8f9fa; padding: 10px; border: 1px solid #dee2e6; text-align: center; }
-    td { border: 1px solid #dee2e6; height: 140px; vertical-align: top; padding: 5px; width: 14.28%; }
-    .day-num { font-weight: bold; font-size: 1rem; margin-bottom: 5px; }
-    .price-tag { font-size: 0.7rem; padding: 2px 4px; border-radius: 4px; margin-bottom: 2px; }
-    .cheap { color: #1d4ed8; font-weight: bold; background-color: #eff6ff; border: 1px solid #bfdbfe; }
-    .normal { color: #4b5563; background-color: #f9fafb; border: 1px solid #f3f4f6; }
-    .exchange-info { font-size: 0.8rem; color: #666; margin-bottom: 1rem; }
-</style>
-""", unsafe_allow_html=True)
+st.title("✈️ 실시간 항공권 캘린더 (Direct Search)")
 
-# 5. 사이드바 검색 조건
 with st.sidebar:
-    st.header("✈️ 실시간 검색 조건")
-    origin_code = st.text_input("출발지 (IATA)", value="ICN").upper()
-    dest_code = st.text_input("도착지 (IATA)", value="NRT").upper()
-    
-    st.subheader("📅 조회 기간")
+    st.header("🔍 검색 조건")
+    origin = st.text_input("출발지 (IATA)", value="ICN").upper()
+    dest = st.text_input("도착지 (IATA)", value="NRT").upper()
     target_year = st.selectbox("연도", [2026, 2027], index=0)
-    target_month = st.selectbox("월", list(range(1, 13)), index=6) # 7월 기본
-    
-    st.subheader("⏳ 체류 기간 (박)")
-    min_stay = st.number_input("최소", 1, 30, 3)
-    max_stay = st.number_input("최대", 1, 30, 7)
-    
+    target_month = st.selectbox("월", list(range(1, 13)), index=4) # 5월 기본
     passengers = st.number_input("인원수", 1, 9, 1)
-    run = st.button("🚀 데이터 분석 시작")
+    run = st.button("🚀 실시간 데이터 분석 시작")
 
-# 6. 메인 화면 로직
-st.title(f"📊 {target_year}년 {target_month}월 항공권 최저가")
-
-# 실시간 환율 적용
 current_rate = get_eur_krw_rate()
-st.markdown(f"<div class='exchange-info'>ℹ️ 현재 실시간 환율: 1 EUR = <b>{current_rate:,.2f} KRW</b> (Yahoo Finance 기준)</div>", unsafe_allow_html=True)
+st.info(f"ℹ️ 현재 환율: 1 EUR = {current_rate:,.2f} KRW")
 
 if run:
-    query_month = f"{target_year}-{target_month:02d}"
+    # 실시간 데이터 수집
+    price_dict, all_prices = fetch_month_prices(origin, dest, target_year, target_month, 0, 0)
     
-    with st.spinner(f"Amadeus 데이터 및 환율 계산 중..."):
-        raw_data = fetch_real_prices(origin_code, dest_code, query_month)
-
-    if not raw_data:
-        st.warning("데이터가 없습니다. (IATA 코드나 날짜를 확인하세요)")
+    if not all_prices:
+        st.error("해당 노선/날짜에 조회 가능한 항공권이 없습니다. IATA 코드를 확인해주세요.")
     else:
-        price_data = {}
-        all_prices = []
-
-        for entry in raw_data:
-            d_date = datetime.datetime.strptime(entry['departureDate'], '%Y-%m-%d')
-            r_date = datetime.datetime.strptime(entry['returnDate'], '%Y-%m-%d')
-            
-            if d_date.year == target_year and d_date.month == target_month:
-                day = d_date.day
-                stay = (r_date - d_date).days
-                # 실시간 환율 적용 가격 계산
-                price = int(float(entry['price']['total']) * current_rate * passengers)
-                
-                if min_stay <= stay <= max_stay:
-                    if day not in price_data:
-                        price_data[day] = {"stays": {}}
-                    if stay not in price_data[day]["stays"] or price < price_data[day]["stays"][stay]:
-                        price_data[day]["stays"][stay] = price
-                        all_prices.append(price)
-
-        threshold = sorted(all_prices)[int(len(all_prices) * 0.2)] if all_prices else 0
-
-        # 달력 렌더링
+        # 달력 그리기 로직 (위와 동일)
         cal = calendar.Calendar(firstweekday=6)
-        month_days = cal.monthdayscalendar(target_year, target_month)
-        week_names = ["일", "월", "화", "수", "목", "금", "토"]
-
-        html = "<table><tr>" + "".join(f"<th>{w}</th>" for w in week_names) + "</tr>"
-        for week in month_days:
+        weeks = cal.monthdayscalendar(target_year, target_month)
+        
+        threshold = sorted(all_prices)[int(len(all_prices) * 0.2)] if all_prices else 0
+        
+        html = "<table style='width:100%; border-collapse:collapse;'>"
+        html += "<tr>" + "".join(f"<th style='border:1px solid #ddd; padding:10px;'>{w}</th>" for w in ["일","월","화","수","목","금","토"]) + "</tr>"
+        
+        for week in weeks:
             html += "<tr>"
             for day in week:
                 if day == 0:
-                    html += "<td></td>"
+                    html += "<td style='border:1px solid #ddd; height:100px;'></td>"
                     continue
-                info = price_data.get(day, {"stays": {}})
-                cell = f"<div class='day-num'>{day}</div>"
-                sorted_stays = sorted(info["stays"].items())
-                if not sorted_stays:
-                    cell += "<div style='color:#ccc; font-size:0.7rem;'>-</div>"
+                
+                info = price_dict.get(day, {"stays": {}})
+                cell = f"<div style='font-weight:bold;'>{day}</div>"
+                
+                if "최저" in info["stays"]:
+                    eur = info["stays"]["최저"]
+                    krw = int(eur * current_rate * passengers)
+                    color = "#1d4ed8" if eur <= threshold else "#4b5563"
+                    cell += f"<div style='color:{color}; font-size:0.8rem; margin-top:5px;'>{krw:,}원</div>"
                 else:
-                    for stay, price in sorted_stays:
-                        is_cheap = "cheap" if price <= threshold else "normal"
-                        cell += f"<div class='price-tag {is_cheap}'>{stay}박: {price:,}원</div>"
-                html += f"<td>{cell}</td>"
+                    cell += "<div style='color:#ccc; font-size:0.7rem;'>-</div>"
+                
+                html += f"<td style='border:1px solid #ddd; height:100px; vertical-align:top; padding:5px;'>{cell}</td>"
             html += "</tr>"
         html += "</table>"
-        
         st.markdown(html, unsafe_allow_html=True)
-        st.success(f"분석 완료: 실시간 환율 {current_rate:,.1f}원이 적용되었습니다.")

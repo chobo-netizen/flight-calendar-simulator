@@ -1,195 +1,139 @@
 import streamlit as st
-import pandas as pd
-from datetime import date, timedelta
-from dateutil.relativedelta import relativedelta
 import calendar
+import datetime
+import random
 import math
 
-# ----------------------------
-# 기본 설정 (여백 최소화)
-# ----------------------------
-st.set_page_config(
-    page_title="항공권 캘린더",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# --------------------
+# 기본 설정
+# --------------------
+st.set_page_config(layout="wide")
 
-st.markdown(
-    "<h3 style='margin-bottom:5px;'>✈️ 항공권 캘린더 시뮬레이터</h3>",
-    unsafe_allow_html=True
-)
+# --------------------
+# 상단 여백 최소화 (CSS)
+# --------------------
+st.markdown("""
+<style>
+.block-container {
+    padding-top: 1rem;
+    padding-bottom: 1rem;
+}
+h1 {
+    font-size: 1.4rem;
+    margin-bottom: 0.2rem;
+}
+h2 {
+    font-size: 1.1rem;
+    margin-bottom: 0.2rem;
+}
+table {
+    font-size: 0.85rem;
+}
+</style>
+""", unsafe_allow_html=True)
 
-# ----------------------------
-# 사이드바 입력 UI
-# ----------------------------
-with st.sidebar:
-    st.markdown("### 실행")
-    run = st.button("▶ 시뮬레이션 실행", use_container_width=True)
+# --------------------
+# 입력 UI
+# --------------------
+st.title("✈️ 항공권 캘린더 시뮬레이터")
 
-    st.markdown("---")
-    st.markdown("### 기본 조건")
+col1, col2, col3, col4 = st.columns([2, 2, 1, 1])
 
-    departure_city = st.text_input(
-        "출발지",
-        value="서울 (ICN)"
-    )
+with col1:
+    origin = st.text_input("출발지", value="서울")
 
-    destination = st.text_input(
-        "도착지",
-        value="후쿠오카"
-    )
+with col2:
+    destination = st.text_input("도착지", value="도쿄")
 
-    col_m1, col_m2 = st.columns(2)
-    with col_m1:
-        start_month = st.date_input(
-            "출발 시작 월",
-            value=date.today().replace(day=1)
-        )
-    with col_m2:
-        month_range = st.selectbox(
-            "출발 월 범위",
-            options=[1, 2],
-            index=1
-        )
+with col3:
+    min_stay = st.number_input("최소 체류일", min_value=1, max_value=30, value=3)
 
-    col_s1, col_s2 = st.columns(2)
-    with col_s1:
-        min_stay = st.number_input(
-            "최소 체류일",
-            min_value=1,
-            max_value=30,
-            value=3
-        )
-    with col_s2:
-        max_stay = st.number_input(
-            "최대 체류일",
-            min_value=1,
-            max_value=30,
-            value=7
-        )
+with col4:
+    max_stay = st.number_input("최대 체류일", min_value=1, max_value=30, value=7)
 
-    st.markdown("### 경유 조건")
-    direct = st.checkbox("직항", value=True)
-    one_stop = st.checkbox("1회 경유")
-    multi_stop = st.checkbox("2회 이상 경유")
+run = st.button("🧮 시뮬레이션 하기")
 
-    st.markdown("### 인원")
-    col_p1, col_p2, col_p3 = st.columns(3)
-    with col_p1:
-        adults = st.number_input("성인", 1, 9, 1)
-    with col_p2:
-        children = st.number_input("어린이", 0, 9, 0)
-    with col_p3:
-        infants = st.number_input("유아", 0, 9, 0)
-
-# ----------------------------
-# 날짜 및 더미 가격 생성
-# ----------------------------
-def generate_departure_dates(start_date, months):
-    end_date = start_date + relativedelta(months=months)
-    dates = []
-    d = start_date
-    while d < end_date:
-        dates.append(d)
-        d += timedelta(days=1)
-    return dates
-
-def fake_price(dep_date, stay):
-    # 임시 가격 로직 (요일/날짜 기반)
-    base = dep_date.day * 1200 + stay * 5000
-    weekend = 15000 if dep_date.weekday() >= 4 else 0
-    return base + weekend
-
-# ----------------------------
-# 달력용 데이터 구조
-# ----------------------------
-def build_calendar_data(dep_dates, min_stay, max_stay):
-    data = {}
-    prices = []
-
-    for d in dep_dates:
-        stays = {}
-        for stay in range(min_stay, max_stay + 1):
-            price = fake_price(d, stay)
-            stays[stay] = price
-            prices.append((d.weekday(), price))
-        data[d] = stays
-
-    return data, prices
-
-def get_thresholds(prices):
-    weekday_prices = [p for w, p in prices if w <= 3]
-    weekend_prices = [p for w, p in prices if w >= 4]
-
-    def threshold(lst):
-        if not lst:
-            return math.inf
-        lst_sorted = sorted(lst)
-        return lst_sorted[int(len(lst_sorted) * 0.3)]
-
-    return threshold(weekday_prices), threshold(weekend_prices)
-
-# ----------------------------
-# 결과 출력 (달력)
-# ----------------------------
+# --------------------
+# 시뮬레이션 실행
+# --------------------
 if run:
-    dep_dates = generate_departure_dates(start_month.replace(day=1), month_range)
-    calendar_data, prices = build_calendar_data(dep_dates, min_stay, max_stay)
-    weekday_th, weekend_th = get_thresholds(prices)
+    year = 2026
+    month = 2
 
-    st.markdown("<hr style='margin:10px 0;'>", unsafe_allow_html=True)
+    st.subheader(f"{year}년 {month}월")
 
-    current_month = None
-    week = []
+    cal = calendar.Calendar(firstweekday=0)
+    month_days = cal.monthdayscalendar(year, month)
 
-    for d in dep_dates:
-        if current_month != (d.year, d.month):
-            if week:
-                st.markdown(render_week(week), unsafe_allow_html=True)
-                week = []
-            st.markdown(
-                f"<h4 style='margin-top:10px;'>{d.year}년 {d.month}월</h4>",
-                unsafe_allow_html=True
-            )
-            current_month = (d.year, d.month)
-            week = [""] * d.weekday()
+    # --------------------
+    # 더미 가격 생성
+    # --------------------
+    price_data = {}
 
-        stays = calendar_data[d]
-        cell = f"<b>{d.month}/{d.day} ({calendar.day_name[d.weekday()]})</b><br>"
-        for stay, price in stays.items():
-            if d.weekday() <= 3 and price <= weekday_th:
-                color = "blue"
-                weight = "bold"
-            elif d.weekday() >= 4 and price <= weekend_th:
-                color = "red"
-                weight = "bold"
-            else:
-                color = "black"
-                weight = "normal"
+    for week in month_days:
+        for day in week:
+            if day == 0:
+                continue
 
-            cell += f"<span style='color:{color}; font-weight:{weight};'>{stay}일 : {price:,}원</span><br>"
+            weekday = datetime.date(year, month, day).weekday()  # 0=월
+            base_price = random.randint(300000, 700000)
 
-        week.append(cell)
+            stays = {}
+            for stay in range(min_stay, max_stay + 1):
+                fluctuation = random.randint(-50000, 80000)
+                stays[stay] = max(150000, base_price + fluctuation)
 
-        if len(week) == 7:
-            st.markdown(render_week(week), unsafe_allow_html=True)
-            week = []
+            price_data[day] = {
+                "weekday": weekday,
+                "stays": stays
+            }
 
-    if week:
-        week += [""] * (7 - len(week))
-        st.markdown(render_week(week), unsafe_allow_html=True)
+    # --------------------
+    # 저렴한 30% 기준선 계산
+    # --------------------
+    weekday_prices = []
+    weekend_prices = []
 
-# ----------------------------
-# 주간 렌더링 함수
-# ----------------------------
-def render_week(cells):
-    html = "<table style='width:100%; table-layout:fixed; border-collapse:collapse;'>"
-    html += "<tr>"
-    for c in cells:
-        html += (
-            "<td style='border:1px solid #ddd; vertical-align:top; "
-            "padding:6px; font-size:12px; height:130px;'>"
-            f"{c}</td>"
-        )
-    html += "</tr></table>"
-    return html
+    for day, info in price_data.items():
+        min_price = min(info["stays"].values())
+        if info["weekday"] <= 3:  # 월~목
+            weekday_prices.append(min_price)
+        else:  # 금~일
+            weekend_prices.append(min_price)
+
+    weekday_threshold = sorted(weekday_prices)[max(0, math.floor(len(weekday_prices) * 0.3) - 1)] if weekday_prices else 0
+    weekend_threshold = sorted(weekend_prices)[max(0, math.floor(len(weekend_prices) * 0.3) - 1)] if weekend_prices else 0
+
+    # --------------------
+    # 달력 출력
+    # --------------------
+    week_names = ["월", "화", "수", "목", "금", "토", "일"]
+
+    html = "<table border='1' style='border-collapse:collapse; width:100%'>"
+    html += "<tr>" + "".join([f"<th>{w}</th>" for w in week_names]) + "</tr>"
+
+    for week in month_days:
+        html += "<tr>"
+        for day in week:
+            if day == 0:
+                html += "<td style='height:130px'></td>"
+                continue
+
+            info = price_data[day]
+            cell = f"<b>{day}</b><br>"
+
+            for stay, price in info["stays"].items():
+                style = ""
+                if info["weekday"] <= 3 and price <= weekday_threshold:
+                    style = "color:blue;font-weight:bold;"
+                if info["weekday"] >= 4 and price <= weekend_threshold:
+                    style = "color:red;font-weight:bold;"
+
+                cell += f"<div style='{style}'>{stay}일 : {price:,}원</div>"
+
+            html += f"<td valign='top' style='padding:4px'>{cell}</td>"
+        html += "</tr>"
+
+    html += "</table>"
+
+    st.markdown(html, unsafe_allow_html=True)

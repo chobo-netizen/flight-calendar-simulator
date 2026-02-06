@@ -4,17 +4,20 @@ import datetime
 from amadeus import Client, ResponseError
 
 # --------------------
-# 1. Amadeus 설정 및 데이터 수집 함수
+# 1. Amadeus 보안 설정 (Secrets 활용)
 # --------------------
-# 발급받으신 키를 여기에 넣었습니다.
-amadeus = Client(
-    client_id='uMjiYwRybLsvIp0ABaDPUUcHVG7S9OIE',
-    client_secret='kgbcorUxITyESvD5'
-)
+# Streamlit Cloud의 Settings > Secrets에 저장된 값을 불러옵니다.
+try:
+    amadeus = Client(
+        client_id=st.secrets["AMADEUS_KEY"],
+        client_secret=st.secrets["AMADEUS_SECRET"]
+    )
+except Exception as e:
+    st.error("API Key 설정 오류: Streamlit Secrets를 확인해주세요.")
+    st.stop()
 
 def fetch_real_prices(origin, destination, departure_date):
     try:
-        # Amadeus의 'Cheapest Date' API는 한 번 호출에 한 달 치 데이터를 묶어 주는 경우가 많아 효율적입니다.
         response = amadeus.shopping.flight_dates.get(
             origin=origin,
             destination=destination,
@@ -27,31 +30,29 @@ def fetch_real_prices(origin, destination, departure_date):
         return []
 
 # --------------------
-# 2. 페이지 설정 및 CSS
+# 2. 페이지 설정 및 CSS (UI 동일)
 # --------------------
-st.set_page_config(layout="wide")
+st.set_page_config(layout="wide", page_title="Amadeus Flight Analyzer")
 st.markdown("""
 <style>
 .block-container { padding-top: 1rem; padding-bottom: 1rem; }
 h1 { font-size: 1.4rem; margin-bottom: 0.3rem; }
 table { font-size: 0.85rem; width: 100%; border-collapse: collapse; }
-th { background-color: #f0f2f6; padding: 10px; }
+th { background-color: #f0f2f6; padding: 10px; border: 1px solid #ddd; }
 td { border: 1px solid #ddd; height: 120px; vertical-align: top; padding: 5px; }
 .price-tag { font-size: 0.75rem; margin-bottom: 2px; }
 </style>
 """, unsafe_allow_html=True)
 
 # --------------------
-# 3. 사이드바 (IATA 코드 입력 안내 필요)
+# 3. 사이드바
 # --------------------
 st.sidebar.header("✈️ 실시간 검색 조건")
-st.sidebar.info("💡 출발지와 도착지는 IATA 코드(예: ICN, NRT)를 입력하세요.")
+st.sidebar.info("IATA 코드(예: ICN, NRT)를 입력하세요.")
 
-origin_code = st.sidebar.text_input("출발지 (IATA)", value="ICN")
-dest_code = st.sidebar.text_input("도착지 (IATA)", value="NRT")
+origin_code = st.sidebar.text_input("출발지", value="ICN").upper()
+dest_code = st.sidebar.text_input("도착지", value="NRT").upper()
 
-# 인원수와 경유 조건은 Amadeus 필터에 맞게 확장 가능하지만, 
-# 우선 가격 표시 로직에 집중합니다.
 passengers = st.sidebar.number_input("인원수", 1, 9, 1)
 
 col1, col2 = st.sidebar.columns(2)
@@ -60,7 +61,7 @@ with col1:
 with col2:
     max_stay = st.number_input("최대 체류", 1, 30, 7)
 
-run = st.sidebar.button("🚀 실시간 데이터 분석 실행")
+run = st.sidebar.button("🚀 실시간 데이터 분석 시작")
 
 # --------------------
 # 4. 메인 분석 로직
@@ -68,17 +69,18 @@ run = st.sidebar.button("🚀 실시간 데이터 분석 실행")
 st.title("✈️ Amadeus 실시간 항공권 캘린더")
 
 if run:
-    # 2026년 2월 기준 (사용자 날짜 선택 가능하게 변경 가능)
-    year, month = 2026, 2
+    # 현재 날짜 기준으로 조회 (테스트 환경에서는 가까운 날짜가 더 잘 나옵니다)
+    today = datetime.date.today()
+    # 다음 달 1일 계산 예시 (또는 고정 날짜)
+    year, month = 2026, 7 
     query_date = f"{year}-{month:02d}-01"
     
-    with st.spinner("Amadeus 서버에서 실시간 최저가를 불러오는 중..."):
+    with st.spinner("Amadeus 엔진에서 데이터를 가져오는 중..."):
         raw_data = fetch_real_prices(origin_code, dest_code, query_date)
 
     if not raw_data:
-        st.warning("조회된 실시간 데이터가 없습니다. 날짜나 장소를 확인해주세요.")
+        st.warning("데이터가 없습니다. (IATA 코드나 날짜를 확인하세요)")
     else:
-        # API 데이터를 캘린더용 price_data 구조로 변환
         price_data = {}
         all_prices = []
 
@@ -86,32 +88,30 @@ if run:
             d_date = datetime.datetime.strptime(entry['departureDate'], '%Y-%m-%d')
             r_date = datetime.datetime.strptime(entry['returnDate'], '%Y-%m-%d')
             
-            if d_date.month != month: continue # 해당 월 데이터만 필터
-            
-            day = d_date.day
-            stay = (r_date - d_date).days
-            price = int(float(entry['price']['total']) * 1500 * passengers) # 환율 1500원 가정
-            
-            if min_stay <= stay <= max_stay:
-                if day not in price_data:
-                    price_data[day] = {"weekday": d_date.weekday(), "stays": {}}
-                price_data[day]["stays"][stay] = price
-                all_prices.append(price)
+            # 해당 월 데이터만 추출
+            if d_date.month == month:
+                day = d_date.day
+                stay = (r_date - d_date).days
+                price = int(float(entry['price']['total']) * 1500 * passengers)
+                
+                if min_stay <= stay <= max_stay:
+                    if day not in price_data:
+                        price_data[day] = {"weekday": d_date.weekday(), "stays": {}}
+                    price_data[day]["stays"][stay] = price
+                    all_prices.append(price)
 
         # --------------------
-        # 5. 달력 렌더링 (기존 HTML 로직 활용)
+        # 5. 달력 렌더링
         # --------------------
-        st.subheader(f"📅 {year}년 {month}월 실시간 리포트 ({origin_code} ➔ {dest_code})")
+        st.subheader(f"📅 {year}년 {month}월 리포트 ({origin_code} ➔ {dest_code})")
         
-        # 하위 30% 저렴한 가격 기준점 계산
         threshold = sorted(all_prices)[int(len(all_prices) * 0.3)] if all_prices else 0
 
         cal = calendar.Calendar(firstweekday=6) # 일요일 시작
         month_days = cal.monthdayscalendar(year, month)
         week_names = ["일", "월", "화", "수", "목", "금", "토"]
 
-        html = "<table>"
-        html += "<tr>" + "".join(f"<th>{w}</th>" for w in week_names) + "</tr>"
+        html = "<table><tr>" + "".join(f"<th>{w}</th>" for w in week_names) + "</tr>"
 
         for week in month_days:
             html += "<tr>"
@@ -121,12 +121,11 @@ if run:
                     continue
 
                 info = price_data.get(day, {"stays": {}})
-                weekday = datetime.date(year, month, day).weekday()
-                
                 cell = f"<b>{day}</b><br>"
-                # 체류일별 가격 나열
-                sorted_stays = sorted(info["stays"].items())
-                for stay, price in sorted_stays:
+                
+                # 체류일별 가격 정렬 후 출력
+                for stay in sorted(info["stays"].keys()):
+                    price = info["stays"][stay]
                     style = "color: blue; font-weight: bold;" if price <= threshold else "color: #555;"
                     cell += f"<div class='price-tag' style='{style}'>{stay}일: {price:,}원</div>"
 
@@ -135,5 +134,4 @@ if run:
         html += "</table>"
         
         st.markdown(html, unsafe_allow_html=True)
-        st.success(f"분석 완료! 총 {len(raw_data)}개의 여정 조합을 확인했습니다.")
-        
+        st.success(f"성공: 총 {len(all_prices)}개의 여정 조합 분석 완료")

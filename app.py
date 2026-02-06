@@ -2,7 +2,6 @@ import streamlit as st
 import calendar
 import datetime
 import random
-import math
 
 # --------------------
 # 페이지 설정
@@ -21,9 +20,6 @@ st.markdown("""
 h1 {
     font-size: 1.4rem;
     margin-bottom: 0.3rem;
-}
-h2 {
-    font-size: 1.1rem;
 }
 table {
     font-size: 0.85rem;
@@ -47,15 +43,25 @@ passengers = st.sidebar.number_input(
     step=1
 )
 
-direct_only = st.sidebar.checkbox("직항만 보기", value=True)
+st.sidebar.subheader("경유 조건")
+direct = st.sidebar.checkbox("직항", value=True)
+one_stop = st.sidebar.checkbox("1회 경유", value=False)
+multi_stop = st.sidebar.checkbox("2회 이상 경유", value=False)
 
-col_a, col_b = st.sidebar.columns(2)
-with col_a:
+col1, col2 = st.sidebar.columns(2)
+with col1:
     min_stay = st.number_input("최소 체류일", 1, 30, 3)
-with col_b:
+with col2:
     max_stay = st.number_input("최대 체류일", 1, 30, 7)
 
 run = st.sidebar.button("🧮 시뮬레이션 실행")
+
+# --------------------
+# 유효성 검사
+# --------------------
+if run and not (direct or one_stop or multi_stop):
+    st.sidebar.error("❗ 최소 하나의 경유 조건을 선택해야 합니다.")
+    st.stop()
 
 # --------------------
 # 메인 타이틀
@@ -74,9 +80,6 @@ if run:
     cal = calendar.Calendar(firstweekday=0)
     month_days = cal.monthdayscalendar(year, month)
 
-    # --------------------
-    # 더미 가격 생성
-    # --------------------
     price_data = {}
 
     for week in month_days:
@@ -85,13 +88,16 @@ if run:
                 continue
 
             weekday = datetime.date(year, month, day).weekday()
-            base_price = random.randint(250000, 600000)
+            base_price = random.randint(260000, 620000)
 
-            # 직항 옵션 반영 (가산)
-            if not direct_only:
+            # 경유 조건에 따른 가중치
+            if direct:
+                base_price += 0
+            if one_stop:
                 base_price -= 30000
+            if multi_stop:
+                base_price -= 60000
 
-            # 인원수 반영
             base_price *= passengers
 
             stays = {}
@@ -105,7 +111,7 @@ if run:
             }
 
     # --------------------
-    # 저렴한 30% 기준선
+    # 저렴한 30% 기준
     # --------------------
     weekday_prices = []
     weekend_prices = []

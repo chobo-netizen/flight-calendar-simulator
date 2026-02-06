@@ -6,3 +6,5 @@ lxml
 python-dateutil
 amadeus
 yfinance
+playwright
+pytest-playwright
